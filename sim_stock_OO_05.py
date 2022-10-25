@@ -5,7 +5,7 @@ import seaborn as sns
 
 class new_order(object):
     """
-    Commande d'approvisionnement d'un entrepôt vers l'amont
+    A class used to represent a replenishment order
     """
 
     def __init__(self, requester, order_qty):
@@ -14,7 +14,14 @@ class new_order(object):
 
 class warehouse(object):
     """
-    Un entrepôt du réseau de distribution
+    A class used to represent a warehouse in the supply chain network
+
+    Methods
+    -------
+    serve_customer()
+        Serve demand based on customer class
+    check_inventory()
+        Check inventory level and place an order if needed
     """
 
     # initialize warehouse object
@@ -41,6 +48,11 @@ class warehouse(object):
         #Monitoring
         self.onHandMonitoring = []
         self.obs_time = []
+        self.missingSales = []
+        self.obs_time_ms = []
+        self.stockOut = []
+        self.obs_time_so = []
+
 
         #Custoemr
         self.customer = customer
@@ -56,20 +68,27 @@ class warehouse(object):
     def serve_customer(self):
         while True:
             yield self.env.timeout(1.)
-            demand = self.customer.demand
-            shipment = min(demand, self.on_hand_inv)
-            self.on_hand_inv -= shipment
-            self.inventory_position -= shipment
+            if self.env.now < 100:
+                demand = self.customer.demand
+            else:
+                demand = self.customer.demand/2.
+            delta = demand -self.on_hand_inv
+            if delta <= 0:
+                self.inventory_position -= demand
+                self.on_hand_inv -= demand
+            else:
+                self.inventory_position -= self.on_hand_inv
+                self.on_hand_inv = 0
+                self.missingSales.append(delta)
+                self.obs_time_ms.append(self.env.now)
             print("{:.2f}, sold {}".format(self.env.now, demand))
-
-
 
     # process to place order
     def check_inventory(self):
         while True:
             self.onHandMonitoring.append(self.on_hand_inv)
             self.obs_time.append(self.env.now)
-            yield self.env.timeout(1.0)
+            yield self.env.timeout(1.)
 
             if self.inventory_position <= self.reorder_point:
                 self.order_qty = self.target_inv - self.on_hand_inv
@@ -95,26 +114,36 @@ class warehouse(object):
                     self.inventory_position -= shipment
                     self.on_hand_inv -= shipment
 
+                # wait for inventory replenishment to ship complete
                 remaining_order = order.orderQty - shipment
                 if remaining_order > 0:
+                    self.stockOut.append(remaining_order)
+                    self.obs_time_so.append(self.env.now)
                     while not self.on_hand_inv >= remaining_order:
-                        yield self.env.timeout(1.0)
-                    self.inventory_position -= remaining_order
-                    self.on_hand_inv -= remaining_order
+                        yield self.env.timeout(1.)
+                    if not self.is_source:
+                        self.inventory_position -= remaining_order
+                        self.on_hand_inv -= remaining_order
                 self.env.process(self.ship(order.orderQty, order.requester))
             else:
                 yield self.env.timeout(1.)
 
     #process to deliver replenishment
     def ship(self, qty, requester):
-        lead_time = self.lead_time
+        if self.env.now < 100:
+            lead_time = self.lead_time
+        else:
+            lead_time = self.lead_time*4
         yield self.env.timeout(lead_time)
         requester.on_hand_inv += qty
         print("{:.2f}, delivery of {}".format(self.env.now, qty))
 
 
 class customer(object):
-    """docstring for customer."""
+    """
+    A class used to represent a customer
+
+    """
 
     def __init__(self, env, demand_parameters):
         self.env = env
@@ -123,7 +152,6 @@ class customer(object):
         self.interarrival = demand_parameters['interarrival']
         self.demand_param = demand_parameters['mean']
         self.demand = 0
-        #self.list_products = demand_parameters['product_name']
 
         self.env.process(self.order())
 
@@ -183,21 +211,22 @@ def run_simulation(print_=False):
     }
 
     c = customer(env, demand_parameters)
-    c2 = customer(env, demand_parameters_2)
+    #c2 = customer(env, demand_parameters_2)
     cdc = warehouse(env, 0, 1, initial_inventory_cdc, inventory_policy_cdc, None, None)
     dc = warehouse(env, 1, 0, initial_inventory_dc, inventory_policy_dc, cdc, None)
-    dc2 = warehouse(env, 1, 0, initial_inventory, inventory_policy, dc, c2)
-    dc3 = warehouse(env, 1, 0, initial_inventory_1, inventory_policy_1, dc, c)
+    dc2 = warehouse(env, 1, 0, initial_inventory, inventory_policy, dc, c)
+    #dc3 = warehouse(env, 1, 0, initial_inventory_1, inventory_policy_1, dc, c)
 
-    env.run(until=150.)
+    env.run(until=200.)
 
 
     if print_ == True:
         sns.set_style("darkgrid")
-        fig, axs = plt.subplots(3)
-        axs[1].step(dc2.obs_time,dc2.onHandMonitoring)
-        axs[2].step(dc3.obs_time,dc3.onHandMonitoring)
+        fig, axs = plt.subplots(4)
         axs[0].step(dc.obs_time,dc.onHandMonitoring)
+        axs[1].bar(dc.obs_time_so,dc.stockOut, color='b')
+        axs[2].step(dc2.obs_time,dc2.onHandMonitoring)
+        axs[3].bar(dc2.obs_time_ms,dc2.missingSales, color='r')
         axs[1].set_xlabel('Time in days')
         axs[0].set_ylabel('Inventory level')
         plt.show()
